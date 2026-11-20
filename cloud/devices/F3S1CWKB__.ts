@@ -139,6 +139,10 @@ export default class Device extends AABBDevice {
     // Last run phase from a 0xBD/0xCD dump. The once-a-minute EC record has no phase of its own
     // (byte 0 stays 0 all cycle), so it carries this forward instead of falling back to Selecting.
     private lastPhase: string | undefined
+    // Cycle settings as chosen at the start. The washer zeroes each one once its phase has passed
+    // (soil after Washing, temperature after Rinsing), so these hold the chosen value until the
+    // cycle ends instead of dropping to None mid-cycle.
+    private held: { temp?: string; spin?: string; soil?: string; rinse?: boolean; rinseCount?: number } = {}
     // Per-course rinse-counter baselines, learned from records with extra rinse off.
     private rinseBase: Record<number, number> = {}
 
@@ -365,6 +369,7 @@ export default class Device extends AABBDevice {
             this.cycleRan = false
             this.completed = false
             this.lastPhase = undefined
+            this.held = {}
             return
         }
 
@@ -377,6 +382,12 @@ export default class Device extends AABBDevice {
         }
         if (completed || courseCode === 0) this.lastPhase = undefined
         const running = courseCode !== 0 && (this.cycleRan || (active[SESSION_OFFSET] & LOCK_FLAG) !== 0)
+        if (!running) this.held = {}
+        const hold = (key: 'temp' | 'spin' | 'soil', value: string | undefined) => {
+            if (!running) return value
+            if (value !== undefined) this.held[key] = value
+            return this.held[key]
+        }
         this.publishProperty(
             'status',
             completed
@@ -397,23 +408,27 @@ export default class Device extends AABBDevice {
                 ? 0
                 : active[REMAINING_OFFSET] || active[ESTIMATE_OFFSET] || active[REMAINING_OFFSET + 1] || 0
         this.publishProperty('remaining_time', remaining)
-        this.publishProperty('temp', TEMP_F3S1.map(active[TEMP_OFFSET]))
-        this.publishProperty('spin', SPIN_F3S1.map(active[SPIN_OFFSET]))
-        this.publishProperty('soil', SOIL.map(active[SOIL_OFFSET]))
+        this.publishProperty('temp', hold('temp', TEMP_F3S1.map(active[TEMP_OFFSET])))
+        this.publishProperty('spin', hold('spin', SPIN_F3S1.map(active[SPIN_OFFSET])))
+        this.publishProperty('soil', hold('soil', SOIL.map(active[SOIL_OFFSET])))
         const reserve = active[RESERVE_OFFSET] * 256 + active[RESERVE_OFFSET + 1]
         this.publishProperty('reserve_time', reserve)
         this.publishProperty('delay_wash', reserve > 0 ? 'ON' : 'OFF')
         this.publishProperty('steam', (active[STEAM_OFFSET] & STEAM_FLAG) !== 0 ? 'ON' : 'OFF')
         this.publishProperty('pre_wash', (active[PRE_WASH_OFFSET] & PRE_WASH_FLAG) !== 0 ? 'ON' : 'OFF')
         this.publishProperty('door_lock', (active[SESSION_OFFSET] & LOCK_FLAG) !== 0 ? 'ON' : 'OFF')
-        const rinse = (active[RINSE_OFFSET] & RINSE_FLAG) !== 0
+        const rinseFlag = (active[RINSE_OFFSET] & RINSE_FLAG) !== 0
+        if (running && rinseFlag) this.held.rinse = true
+        const rinse = rinseFlag || (running && this.held.rinse === true)
         this.publishProperty('extra_rinse', rinse ? 'ON' : 'OFF')
         if (!rinse) this.rinseBase[courseCode] = active[RINSE_COUNT_OFFSET]
         const rinseBase = this.rinseBase[courseCode]
-        this.publishProperty(
-            'extra_rinse_count',
-            rinse && rinseBase !== undefined ? Math.max(0, active[RINSE_COUNT_OFFSET] - rinseBase) : 0,
-        )
+        let rinseCount = rinse && rinseBase !== undefined ? Math.max(0, active[RINSE_COUNT_OFFSET] - rinseBase) : 0
+        if (running && rinse) {
+            if (rinseFlag) this.held.rinseCount = rinseCount
+            else rinseCount = this.held.rinseCount ?? rinseCount
+        }
+        this.publishProperty('extra_rinse_count', rinseCount)
     }
 
     setProperty(prop: string, value: string) {

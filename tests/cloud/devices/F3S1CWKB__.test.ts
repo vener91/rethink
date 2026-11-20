@@ -36,6 +36,19 @@ const CD_WASHING =
 const EC_IDLE_CHECKIN =
     'AA6033EC002B0000000E00000000000000000000010000003F000000109000000000260400000000000000400000000000002B0000000E00000000000000000000010000003F0000001090000000002604000000000000004000000000007ABB'
 
+// EC_SPEED_WASH_RUNNING with soil Normal (3) and temperature Cold (14) set in the current record,
+// then the same record after the washer zeroed both bytes mid-cycle (as a WKE100HWA does once the
+// wash and rinse phases have passed).
+function withSettings(frame: string, soil: number, temp: number): string {
+    const b = buf(frame)
+    const cur = 2 + 2 + 2 + 0x2b + 2 // AA len | 33 EC | rec1 len | rec1 | rec2 len
+    b[cur + 1] = soil
+    b[cur + 2] = temp
+    return hex(b)
+}
+const EC_RUNNING_SETTINGS = withSettings(EC_SPEED_WASH_RUNNING, 3, 14)
+const EC_RUNNING_SETTINGS_CLEARED = withSettings(EC_SPEED_WASH_RUNNING, 0, 0)
+
 const SEND_POWER_ON = 'AA0DF0E5000201FF010201C7BB'
 const SEND_POWER_OFF = 'AA0DF0E5000201FF010200C4BB'
 
@@ -127,6 +140,19 @@ describe(MODEL_ID, () => {
         const props = ha.devices[DEVICE_ID].properties
         assert.equal(props['power'], 'OFF')
         assert.equal(props['status'], 'Off')
+    })
+
+    test('soil and temperature hold their chosen values when the washer zeroes them mid-cycle', () => {
+        const { ha, thinq } = makeDevice()
+        thinq.emit('data', buf(EC_RUNNING_SETTINGS))
+        thinq.emit('data', buf(EC_RUNNING_SETTINGS_CLEARED))
+        const props = ha.devices[DEVICE_ID].properties
+        assert.equal(props['soil'], 'Normal')
+        assert.equal(props['temp'], 'Cold')
+        thinq.emit('data', buf(EC_SPEED_WASH_COMPLETE))
+        assert.equal(props['status'], 'Complete')
+        assert.equal(props['soil'], 'None')
+        assert.equal(props['temp'], 'None')
     })
 
     test('setProperty power sends the F0 E5 command', () => {
